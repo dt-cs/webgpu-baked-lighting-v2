@@ -1,0 +1,70 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #ffffff;
+  background: #171513;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root,
+.app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+}
+
+canvas {
+  display: block;
+}
+
+.instructions,
+.diagnostics {
+  position: fixed;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.58);
+  color: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+}
+
+.diagnostics {
+  top: 16px;
+  left: 16px;
+  max-width: 360px;
+}
+
+.instructions {
+  bottom: 16px;
+  left: 16px;
+  max-width: 430px;
+}
+
+.diagnostics.is-ok {
+  border-color: rgba(110, 220, 150, 0.54);
+}
+
+.diagnostics.is-warning {
+  border-color: rgba(255, 180, 90, 0.65);
+}
+
+.instructions span,
+.diagnostics span,
+.diagnostics small {
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.74);
+}
