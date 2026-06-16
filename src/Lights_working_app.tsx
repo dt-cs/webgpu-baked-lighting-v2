@@ -1,15 +1,31 @@
-/*
- * App_with_light_probes.tsx
+/**
+ * App.tsx
+ * Parallax-corrected cubemap environment mapping for a baked WebGPU room scene.
  *
- * Parallax‑corrected cubemap environment mapping for a baked WebGPU room
- * scene, augmented with a dynamic light probe for GI‑like lighting on
- * imported test models. This version of the app builds upon the original
- * implementation and demonstrates how to generate a spherical harmonic
- * light probe from a captured environment cubemap using three.js’s
- * LightProbeGenerator. The resulting probe provides diffuse global
- * illumination on the test models without re‑baking the scene. A Leva
- * control allows adjusting the light probe intensity at runtime, and an
- * optional helper renders a visualisation of the probe’s SH basis.
+ * Reference: https://github.com/simongeilfus/Cinder-Experiments/tree/master/ParallaxCorrectedCubemap
+ *
+ * Pipeline follows the Cinder reference exactly:
+ *   1. Load room model, rescale/recentre to origin
+ *   2. Set cubemap bounds: position + size (AABB)
+ *   3. renderCubemap(): render scene with uReflections=0 from bounds centre
+ *   4. renderScene(): lightmap + reflection additively blended via uReflections=1
+ *
+ * Shader follows shader.frag exactly:
+ *   getBoxIntersection(vPosition, R, cubeMapSize, cubeMapPos)
+ *   lookup = boxIntersection - cubeMapPos
+ *   oColor = lighting + mix(0, reflection, uReflections)
+ *
+ * AO map attenuates the reflection (envNode) in occluded areas without
+ * touching the baked diffuse lightmap.
+ *
+ * Lightmap owns all diffuse. scene.environment = null always.
+ *
+ * ─── Shadow fix note ─────────────────────────────────────────────────────────
+ * WebGPU shadows MUST be enabled via <Canvas shadows={...} /> prop, NOT by
+ * setting renderer.shadowMap.enabled manually inside createRenderer().
+ * R3F initialises the renderer internally after createRenderer() returns —
+ * any manual shadowMap config set before that point is overwritten.
+ * The Canvas shadows prop hooks into R3F's own init sequence at the correct time.
  */
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -17,12 +33,10 @@ import { Canvas, extend, useFrame, useLoader, useThree } from '@react-three/fibe
 import { OrbitControls } from '@react-three/drei'
 import { folder, useControls, button } from 'leva'
 import * as THREE from 'three/webgpu'
-import { Fn, float, lights, min as tslMin, positionWorld, pmremTexture, reflectVector, vec3, reflector, color, uv, texture } from 'three/tsl'
+import { Fn, float, lights, min as tslMin, positionWorld, pmremTexture, reflectVector, vec3 } from 'three/tsl'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 import { EXRLoader } from 'three/addons/loaders/EXRLoader.js'
-import { LightProbeGenerator } from 'three/addons/lights/LightProbeGenerator.js'
-import { LightProbeHelper } from 'three/addons/helpers/LightProbeHelperGPU.js'
 
 extend(THREE as unknown as Record<string, unknown>)
 
@@ -48,7 +62,7 @@ const SKYBOX_ROTATION_Y_RAD = THREE.MathUtils.degToRad(277)
 const CUBEMAP_SIZE = new THREE.Vector3(168.687, 68.251, 100.167)
 const CUBEMAP_POS  = new THREE.Vector3(0, 0, 0)
 
-/* --------------------------- mesh‑name routing --------------------------- */
+/* --------------------------- mesh-name routing --------------------------- */
 
 type Group = 'floor' | 'wall' | 'roof' | 'wood' | 'metal' | 'unknown'
 type Atlas  = 'tile'  | 'wood'
@@ -88,7 +102,6 @@ const TONE_MAPPING: Record<string, THREE.ToneMapping> = {
 
 type MaterialMode = 'GI only' | 'PBR + baked GI' | 'UV debug'
 
-// Extend the existing SceneControls to include probe configuration
 type SceneControls = {
   materialMode:              MaterialMode
   bakedGiEnabled:            boolean
@@ -155,13 +168,6 @@ type SceneControls = {
   dirLightZ:         number
   dirLightColor:     string
   dirLightIntensity: number
-  // light probe
-  lightProbeIntensity: number
-  showProbeHelper:     boolean
-  // shadow plane
-  shadowPlaneOpacity?: number
-  // mirror plane opacity (0 = no reflection, 1 = fully opaque)
-  mirrorOpacity?: number
 }
 
 type PbrSet    = { color: THREE.Texture; normal: THREE.Texture; roughness?: THREE.Texture }
@@ -231,12 +237,11 @@ function envIntensity(group: Group, c: SceneControls) {
 
 /* ---------------------------- test models -------------------------------- */
 
-function TestModels({ controls, modelLight, dirLight, spotLight, lightProbe }: {
+function TestModels({ controls, modelLight, dirLight, spotLight }: {
   controls: SceneControls
   modelLight: THREE.PointLight | null
   dirLight:   THREE.DirectionalLight | null
   spotLight:  THREE.SpotLight | null
-  lightProbe: THREE.LightProbe | null
 }) {
   const gltf = useLoader(GLTFLoader, TEST_MODELS_URL, (l) => l.setDRACOLoader(dracoLoader))
   const root = useMemo(() => gltf.scene.clone(true), [gltf.scene])
@@ -248,27 +253,19 @@ function TestModels({ controls, modelLight, dirLight, spotLight, lightProbe }: {
       mesh.castShadow    = true
       mesh.receiveShadow = true
       // MeshStandardNodeMaterial so we can use lightsNode
-      // Use a soft off‑white colour and moderate roughness for an architectural look.
-      // A lower roughness yields a subtle sheen while still appearing matte.
       const m = new THREE.MeshStandardNodeMaterial({
-        color: '#f5f5f0',
-        roughness: 0.4,
+        color: '#f2f2f2',
+        roughness: 0.7,
         metalness: 0.0,
         side: THREE.DoubleSide,
       })
-      // Compose the list of lights: model lights, directional, spot, and probe
-      const lightList = [
-        ...(modelLight ? [modelLight] : []),
-        ...(dirLight   ? [dirLight]   : []),
-        ...(spotLight  ? [spotLight]  : []),
-        ...(lightProbe ? [lightProbe] : []),
-      ]
+      // Selective lighting: model only receives modelLight, not roomLight or spotlight
+      // Models get both point light and directional light
+      const lightList = [...(modelLight ? [modelLight] : []), ...(dirLight ? [dirLight] : []), ...(spotLight ? [spotLight] : [])]
       m.lightsNode = lights(lightList)
-      // Use the cubemap environment from BPCEM for specular reflections if enabled
-      // Reflection intensity is controlled globally via envNode within Scene
       mesh.material = m
     })
-  }, [root, modelLight, dirLight, spotLight, lightProbe])
+  }, [root, modelLight, dirLight, spotLight])
 
   return (
     <primitive
@@ -281,13 +278,12 @@ function TestModels({ controls, modelLight, dirLight, spotLight, lightProbe }: {
 
 /* --------------------------------- room ---------------------------------- */
 
-function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLightProbe }: {
+function BakedRoom({ controls, forestExr, onReport, roomLight }: {
   controls:  SceneControls
   forestExr: THREE.Texture | null
   onReport:  (r: MeshReport) => void
   roomLight: THREE.PointLight | null
   dirLight:  THREE.DirectionalLight | null
-  onLightProbe: (lp: THREE.LightProbe) => void
 }) {
   const { gl, scene } = useThree()
 
@@ -321,117 +317,15 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
       if (!mesh.isMesh) return
       mesh.receiveShadow = true
       const n = (mesh.name || '').toLowerCase()
-      // Only the table surfaces (not shelves) should cast onto the contact
-      // shadow plane. Shelves and other baked geometry often produce broad
-      // stripes when illuminated by the spotlight. Restricting shadow
-      // casting to tables prevents these dark bands and keeps the GI
-      // consistent while still providing occlusion for the dynamic models.
-      const isTableSurface = n.includes('table')
-      mesh.castShadow = isTableSurface
-      if (isTableSurface && mesh.material) {
+      const isTable = n.includes('table') || n.includes('shelf')
+      mesh.castShadow = isTable
+      if (isTable && mesh.material) {
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
         mats.forEach((m: THREE.Material) => { m.side = THREE.DoubleSide })
       }
     })
     return r
   }, [gltf.scene])
-
-  /* ------------------------------------------------------------------------
-   * Shadow plane generation
-   *
-   * Some dynamic objects (the test models) need to cast shadows onto the table
-   * surface without affecting the baked lightmap. To achieve this, we create a
-   * transparent plane just above each table top and assign it a `ShadowMaterial`.
-   * `ShadowMaterial` darkens only where a shadow falls and leaves the baked
-   * lighting untouched. The plane is sized to match the table’s footprint by
-   * computing a bounding box for meshes whose name includes “table”.
-   */
-  const shadowPlanes = useMemo(() => {
-    const planes: { width: number; depth: number; position: THREE.Vector3 }[] = []
-    root.traverse((child) => {
-      const mesh = child as THREE.Mesh
-      if (!mesh.isMesh) return
-      const name = (mesh.name || '').toLowerCase()
-      if (name.includes('table')) {
-        const box = new THREE.Box3().setFromObject(mesh)
-        const size = new THREE.Vector3()
-        box.getSize(size)
-        const center = new THREE.Vector3()
-        box.getCenter(center)
-        const width = size.x
-        const depth = size.z
-        // Position the plane slightly above the table surface to avoid z‑fighting
-        const y = box.max.y + 0.01
-        planes.push({ width, depth, position: new THREE.Vector3(center.x, y, center.z) })
-      }
-    })
-    return planes
-  }, [root])
-
-  /* ------------------------------------------------------------------------
-   * Mirror plane generation
-   *
-   * To render planar reflections of the dynamic test models on the table
-   * surfaces, we overlay a thin, reflective plane on top of each table. The
-   * reflection is implemented using the `reflector()` node from three/tsl.
-   * This approach is similar to the `webgpu_mirror.html` example: a
-   * `reflector()` produces a node with an associated render target that
-   * captures a mirrored view of the scene. The node can be used directly as
-   * the `colorNode` for a `MeshPhongNodeMaterial`, producing a mirror effect.
-   * We attach the reflector’s internal target to the plane so that it
-   * automatically updates each frame. The resulting planes are stored in
-   * `mirrorPlanes` and rendered conditionally when reflections are enabled.
-   */
-  const mirrorPlanes = useMemo(() => {
-    const planes: THREE.Mesh[] = []
-    if (!controls.reflectionsEnabled) return planes
-    shadowPlanes.forEach(({ width, depth, position }) => {
-      // Create a reflector node for planar reflections.
-      const refl = reflector()
-      // Distort the reflection UVs based on the wall normal map. This creates
-      // ripples in the reflection that follow the surface’s bumpiness, as
-      // demonstrated in the WebGPU mirror example. We sample the normal map at
-      // a higher frequency (multiplying the UVs by 5) and convert the sampled
-      // XY values from [0,1] to [-1,1]. The scale determines how strong the
-      // distortion appears; negative values invert the direction.
-      const normalScale = -0.05
-      const uvOffset = texture(wallNormal, uv().mul(5)).xy.mul(2).sub(1).mul(normalScale)
-      refl.uvNode = refl.uvNode.add(uvOffset)
-      // Compute a reflection scale based on the scene’s roughness settings. A
-      // higher material roughness reduces the reflection intensity. We use the
-      // floor roughness as a proxy for the table’s roughness; if you’d like
-      // to differentiate between materials, you could inspect the group and
-      // choose between `controls.floorRoughness`, `controls.wallRoughness` or
-      // `controls.roofRoughness` accordingly. The scale is clamped to [0,1].
-      // Use the wall roughness as the proxy for table surfaces. Tables are
-      // constructed with the same tile material as the walls (wall tile
-      // material). A higher wall roughness reduces the reflection intensity. If
-      // you want to blend based on a different material, adjust this value.
-      const reflectionScale = Math.max(0, Math.min(1, 1 - controls.wallRoughness))
-      // Multiply the reflection node by this scale so rough surfaces reflect
-      // less light. This approach mirrors the roughness‑driven blending
-      // demonstrated in the `webgpu_reflection_roughness.html` example.
-      const mat = new THREE.MeshPhongNodeMaterial({ colorNode: refl.mul(reflectionScale) })
-      // Blend the reflection with the underlying table by adjusting opacity.
-      // Transparent materials allow the baked texture to show through. Use the
-      // `mirror opacity` control in Leva to tune the effect.
-      mat.transparent = true
-      mat.opacity = controls.mirrorOpacity ?? 1
-      // Plane geometry sized to the table footprint
-      const geo = new THREE.PlaneGeometry(width, depth)
-      // Create the mesh and orient it horizontally
-      const plane = new THREE.Mesh(geo, mat)
-      plane.rotation.x = -Math.PI / 2
-      // Position the reflector slightly above the table and above the shadow plane
-      plane.position.set(position.x, position.y + 0.01, position.z)
-      plane.castShadow = false
-      plane.receiveShadow = false
-      // Attach the reflector’s render target so it updates automatically
-      plane.add(refl.target)
-      planes.push(plane)
-    })
-    return planes
-  }, [shadowPlanes, controls.reflectionsEnabled, controls.mirrorOpacity, controls.wallRoughness, wallNormal])
 
   /* cube render target — static, captured once */
   const capControls = useControls('cube capture', {
@@ -441,7 +335,7 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
   const cubeRes = (capControls as unknown as { cubeResolution: number }).cubeResolution
 
   const { cubeRt, cubeCam } = useMemo(() => {
-    const rt = new THREE.CubeRenderTarget(cubeRes, { type: THREE.HalfFloatType, format: THREE.RGBAFormat })
+    const rt = new THREE.CubeRenderTarget(cubeRes, { type: THREE.HalfFloatType })
     rt.texture.minFilter       = THREE.LinearMipmapLinearFilter
     rt.texture.magFilter       = THREE.LinearFilter
     rt.texture.generateMipmaps = true
@@ -514,15 +408,6 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
     scene.background  = prevBg
     scene.environment = prevEnv
 
-    // Generate a spherical harmonic light probe from the captured cubemap.
-    // The asynchronous helper reads pixel data back from the GPU. The probe
-    // contains the averaged ambient lighting which can then be applied to
-    // dynamic models. The intensity is set in Scene from controls.
-    LightProbeGenerator.fromCubeRenderTarget(gl as unknown as THREE.WebGLRenderer, cubeRt).then((probe) => {
-      probe.intensity = controls.lightProbeIntensity
-      onLightProbe(probe)
-    })
-
     buildMaterials()
   })
 
@@ -571,7 +456,8 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
         m.envNode           = pbrMode && controls.reflectionsEnabled ? bpcemEnvNode : null
         m.envMap            = null
         m.envMapIntensity   = pbrMode && controls.reflectionsEnabled ? envIntensity(group, controls) : 0
-        // Selective lighting: room only receives roomLight, not model lights or spotlight
+        // Selective lighting: room only receives roomLight, not modelLight or spotlight
+        // Room gets roomLight only — dirLight is for models only
         m.lightsNode        = roomLight ? lights([roomLight]) : lights([])
         m.needsUpdate       = true
         return m
@@ -633,29 +519,7 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
     controls.allFromGlb, roomLight,
   ])
 
-  return (
-    <>
-      <primitive object={root} />
-      {shadowPlanes.map((plane, idx) => (
-        <mesh
-          key={`shadow-plane-${idx}`}
-          position={[plane.position.x, plane.position.y, plane.position.z]}
-          rotation={[-Math.PI / 2, 0, 0]}
-          receiveShadow
-        >
-          {/* Plane sized to the table footprint. Rotation tilts it horizontally */}
-          <planeGeometry args={[plane.width, plane.depth]} />
-          {/* ShadowMaterial darkens only where a shadow falls. Opacity is adjustable via controls. */}
-          <shadowMaterial opacity={controls.shadowPlaneOpacity ?? 0.5} />
-        </mesh>
-      ))}
-      {/* Mirror planes: these overlay each table to provide planar reflections of
-          dynamic objects. They are only rendered when reflections are enabled. */}
-      {mirrorPlanes.map((plane, idx) => (
-        <primitive key={`mirror-plane-${idx}`} object={plane} />
-      ))}
-    </>
-  )
+  return <primitive object={root} />
 }
 
 /* ------------------------------ camera setup ----------------------------- */
@@ -810,8 +674,6 @@ function Scene({ controls, onReport }: { controls: SceneControls; onReport: (r: 
   const [modelLight,  setModelLight]  = useState<THREE.PointLight | null>(null)
   const [dirLight,    setDirLight]    = useState<THREE.DirectionalLight | null>(null)
   const [spotLight,   setSpotLight]   = useState<THREE.SpotLight | null>(null)
-  const [lightProbe,  setLightProbe]  = useState<THREE.LightProbe | null>(null)
-  const [probeHelper, setProbeHelper] = useState<THREE.LightProbeHelper | null>(null)
   const { scene } = useThree()
   const exr = useLoader(EXRLoader, FOREST_EXR_URL) as THREE.Texture
 
@@ -819,39 +681,6 @@ function Scene({ controls, onReport }: { controls: SceneControls; onReport: (r: 
     exr.mapping = THREE.EquirectangularReflectionMapping
     setForestExr(exr)
   }, [exr])
-
-  // Manage the light probe and its helper
-  useEffect(() => {
-    if (lightProbe) {
-      scene.add(lightProbe)
-      // Create helper if not existing
-      let helper = probeHelper
-      if (!helper) {
-        helper = new LightProbeHelper(lightProbe, 1)
-        helper.visible = controls.showProbeHelper
-        scene.add(helper)
-        setProbeHelper(helper)
-      }
-      return () => {
-        scene.remove(lightProbe)
-        if (helper) {
-          scene.remove(helper)
-          helper.dispose()
-          setProbeHelper(null)
-        }
-      }
-    }
-  }, [scene, lightProbe])
-
-  // Update helper visibility and probe intensity when controls change
-  useEffect(() => {
-    if (lightProbe) {
-      lightProbe.intensity = controls.lightProbeIntensity
-    }
-    if (probeHelper) {
-      probeHelper.visible = controls.showProbeHelper
-    }
-  }, [controls.lightProbeIntensity, controls.showProbeHelper, lightProbe, probeHelper])
 
   useEffect(() => {
     scene.environment = null
@@ -864,9 +693,9 @@ function Scene({ controls, onReport }: { controls: SceneControls; onReport: (r: 
     <>
       <RendererSettings toneMapping={controls.toneMapping} exposure={controls.exposure} fov={controls.cameraFov} />
       <SceneLights onRoomLight={setRoomLight} onModelLight={setModelLight} onDirLight={setDirLight} onSpotLight={setSpotLight} controls={controls} />
-      <BakedRoom controls={controls} forestExr={forestExr} onReport={onReport} roomLight={roomLight} dirLight={dirLight} onLightProbe={setLightProbe} />
+      <BakedRoom controls={controls} forestExr={forestExr} onReport={onReport} roomLight={roomLight} dirLight={dirLight} />
       <Suspense fallback={null}>
-        <TestModels controls={controls} modelLight={modelLight} dirLight={dirLight} spotLight={spotLight} lightProbe={lightProbe} />
+        <TestModels controls={controls} modelLight={modelLight} dirLight={dirLight} spotLight={spotLight} />
       </Suspense>
       <FrameOnce />
       <OrbitControls makeDefault enablePan enableZoom enableDamping dampingFactor={0.08} />
@@ -893,7 +722,7 @@ function Diagnostics({ report }: { report: MeshReport }) {
 
 /* ---------------------------------- app ---------------------------------- */
 
-export default function AppWithLightProbes() {
+export default function App() {
   const [report, setReport] = useState<MeshReport>({ meshCount: 0, uv1Count: 0, unmatched: [] })
 
   const raw = useControls('parallax corrected cubemap', {
@@ -926,7 +755,6 @@ export default function AppWithLightProbes() {
       roofEnvIntensity:   { value: 0.05, min: 0, max: 3, step: 0.01, label: 'roof'  },
       woodEnvIntensity:   { value: 0.4,  min: 0, max: 3, step: 0.01, label: 'wood'  },
       metalEnvIntensity:  { value: 1,    min: 0, max: 5, step: 0.01, label: 'metal' },
-      mirrorOpacity:      { value: 1, min: 0, max: 1, step: 0.01, label: 'mirror opacity' },
     }),
 
     ao: folder({
@@ -986,29 +814,11 @@ export default function AppWithLightProbes() {
       shadowIntensity: { value: 1,     min: 0,    max: 1,     step: 0.01, label: 'shadow intensity' },
       showHelper:      { value: false,                                    label: 'show helper' },
     }),
-
-    lightProbe: folder({
-      lightProbeIntensity: { value: 1, min: 0, max: 2, step: 0.02, label: 'probe intensity' },
-      showProbeHelper:     { value: false, label: 'show probe helper' },
-    }),
-
-    shadows: folder({
-      shadowPlaneOpacity: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'shadow opacity' },
-    }),
   })
 
-  // Leva flattens folder properties into the root of the returned object. When
-  // accessing values defined inside `folder()`, they appear as top‑level keys
-  // (e.g. `lightProbeIntensity` rather than `lightProbe.lightProbeIntensity`).
-  // To build our strongly typed SceneControls object, spread the raw values and
-  // then explicitly assign toneMapping and the probe controls.
   const controls: SceneControls = {
-    ...(raw as unknown as Omit<SceneControls, 'toneMapping' | 'lightProbeIntensity' | 'showProbeHelper'>),
-    toneMapping: TONE_MAPPING[(raw as any).toneMapping],
-    lightProbeIntensity: (raw as any).lightProbeIntensity,
-    showProbeHelper: (raw as any).showProbeHelper,
-    shadowPlaneOpacity: (raw as any).shadowPlaneOpacity,
-    mirrorOpacity: (raw as any).mirrorOpacity,
+    ...(raw as unknown as Omit<SceneControls, 'toneMapping'>),
+    toneMapping: TONE_MAPPING[(raw as unknown as { toneMapping: string }).toneMapping],
   }
 
   const createRenderer = useCallback(async (props: Record<string, unknown>) => {
