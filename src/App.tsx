@@ -17,7 +17,7 @@ import { Canvas, extend, useFrame, useLoader, useThree } from '@react-three/fibe
 import { OrbitControls } from '@react-three/drei'
 import { folder, useControls, button } from 'leva'
 import * as THREE from 'three/webgpu'
-import { Fn, float, lights, min as tslMin, positionWorld, pmremTexture, reflectVector, vec3, reflector, color, uv, texture } from 'three/tsl'
+import { Fn, float, lights, min as tslMin, positionWorld, pmremTexture, reflectVector, vec2, vec3, reflector, texture, uv } from 'three/tsl'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 import { EXRLoader } from 'three/addons/loaders/EXRLoader.js'
@@ -30,6 +30,7 @@ extend(THREE as unknown as Record<string, unknown>)
 
 const MODEL_URL         = '/assets/simple_bake_01.glb'
 const TEST_MODELS_URL   = '/assets/test_models.glb'
+const REFLECTOR_URL     = '/assets/reflector.glb'
 const TILE_LIGHTMAP_URL = '/assets/bake_black_tile.png'
 const WOOD_LIGHTMAP_URL = '/assets/wood_lm.png'
 const TILE_AO_URL       = '/assets/ao_tile.png'
@@ -158,10 +159,23 @@ type SceneControls = {
   // light probe
   lightProbeIntensity: number
   showProbeHelper:     boolean
-  // shadow plane
   shadowPlaneOpacity?: number
-  // mirror plane opacity (0 = no reflection, 1 = fully opaque)
   mirrorOpacity?: number
+  reflectorEnabled: boolean
+  reflectorStrength: number
+  reflectorNormalDistortion: number
+  reflectorRoughnessMaskStrength: number
+  reflectorYOffset: number
+  reflectorTargetRotX: number
+  reflectorTargetRotY: number
+  reflectorTargetRotZ: number
+  reflectorUvFlipX: boolean
+  reflectorUvFlipY: boolean
+  reflectorUvScaleX: number
+  reflectorUvScaleY: number
+  reflectorUvOffsetX: number
+  reflectorUvOffsetY: number
+  reflectorDebugMode: 'reflection' | 'base color' | 'normal map' | 'roughness mask'
 }
 
 type PbrSet    = { color: THREE.Texture; normal: THREE.Texture; roughness?: THREE.Texture }
@@ -248,11 +262,9 @@ function TestModels({ controls, modelLight, dirLight, spotLight, lightProbe }: {
       mesh.castShadow    = true
       mesh.receiveShadow = true
       // MeshStandardNodeMaterial so we can use lightsNode
-      // Use a soft off‑white colour and moderate roughness for an architectural look.
-      // A lower roughness yields a subtle sheen while still appearing matte.
       const m = new THREE.MeshStandardNodeMaterial({
-        color: '#f5f5f0',
-        roughness: 0.4,
+        color: '#f2f2f2',
+        roughness: 0.7,
         metalness: 0.0,
         side: THREE.DoubleSide,
       })
@@ -292,6 +304,7 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
   const { gl, scene } = useThree()
 
   const gltf = useLoader(GLTFLoader, MODEL_URL, (l) => l.setDRACOLoader(dracoLoader))
+  const reflectorGltf = useLoader(GLTFLoader, REFLECTOR_URL, (l) => l.setDRACOLoader(dracoLoader))
 
   const [tileLightMap, woodLightMap, tileAo, woodAo] = useLoader(THREE.TextureLoader, [
     TILE_LIGHTMAP_URL, WOOD_LIGHTMAP_URL, TILE_AO_URL, WOOD_AO_URL,
@@ -313,6 +326,7 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
     const box    = new THREE.Box3().setFromObject(r)
     const centre = box.getCenter(new THREE.Vector3())
     r.position.sub(centre)
+    r.userData.recenterOffset = centre.clone().multiplyScalar(-1)
     r.updateMatrixWorld(true)
     console.info('[room] recentred. original centre:', centre)
     // Table and shelf cast shadows to block the spotlight
@@ -321,11 +335,6 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
       if (!mesh.isMesh) return
       mesh.receiveShadow = true
       const n = (mesh.name || '').toLowerCase()
-      // Only the table surfaces (not shelves) should cast onto the contact
-      // shadow plane. Shelves and other baked geometry often produce broad
-      // stripes when illuminated by the spotlight. Restricting shadow
-      // casting to tables prevents these dark bands and keeps the GI
-      // consistent while still providing occlusion for the dynamic models.
       const isTableSurface = n.includes('table')
       mesh.castShadow = isTableSurface
       if (isTableSurface && mesh.material) {
@@ -336,16 +345,6 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
     return r
   }, [gltf.scene])
 
-  /* ------------------------------------------------------------------------
-   * Shadow plane generation
-   *
-   * Some dynamic objects (the test models) need to cast shadows onto the table
-   * surface without affecting the baked lightmap. To achieve this, we create a
-   * transparent plane just above each table top and assign it a `ShadowMaterial`.
-   * `ShadowMaterial` darkens only where a shadow falls and leaves the baked
-   * lighting untouched. The plane is sized to match the table’s footprint by
-   * computing a bounding box for meshes whose name includes “table”.
-   */
   const shadowPlanes = useMemo(() => {
     const planes: { width: number; depth: number; position: THREE.Vector3 }[] = []
     root.traverse((child) => {
@@ -358,80 +357,124 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
         box.getSize(size)
         const center = new THREE.Vector3()
         box.getCenter(center)
-        const width = size.x
-        const depth = size.z
-        // Position the plane slightly above the table surface to avoid z‑fighting
-        const y = box.max.y + 0.01
-        planes.push({ width, depth, position: new THREE.Vector3(center.x, y, center.z) })
+        planes.push({
+          width: size.x,
+          depth: size.z,
+          position: new THREE.Vector3(center.x, box.max.y + 0.01, center.z),
+        })
       }
     })
     return planes
   }, [root])
 
+
   /* ------------------------------------------------------------------------
-   * Mirror plane generation
+   * GLB reflector receiver
    *
-   * To render planar reflections of the dynamic test models on the table
-   * surfaces, we overlay a thin, reflective plane on top of each table. The
-   * reflection is implemented using the `reflector()` node from three/tsl.
-   * This approach is similar to the `webgpu_mirror.html` example: a
-   * `reflector()` produces a node with an associated render target that
-   * captures a mirrored view of the scene. The node can be used directly as
-   * the `colorNode` for a `MeshPhongNodeMaterial`, producing a mirror effect.
-   * We attach the reflector’s internal target to the plane so that it
-   * automatically updates each frame. The resulting planes are stored in
-   * `mirrorPlanes` and rendered conditionally when reflections are enabled.
+   * /assets/reflector.glb is a real plane mesh authored on top of the table.
+   * It uses the same UVs as the table. We keep the real table material below,
+   * then add this as a WebGPU TSL reflector layer. The wall/table roughness map
+   * masks the reflection so rough areas stay diffuse and glossy areas reflect.
    */
-  const mirrorPlanes = useMemo(() => {
-    const planes: THREE.Mesh[] = []
-    if (!controls.reflectionsEnabled) return planes
-    shadowPlanes.forEach(({ width, depth, position }) => {
-      // Create a reflector node for planar reflections.
+  const reflectorRoot = useMemo(() => {
+    const r = reflectorGltf.scene.clone(true)
+    const recenterOffset = (root.userData.recenterOffset as THREE.Vector3 | undefined) ?? new THREE.Vector3()
+    r.position.copy(recenterOffset)
+    r.position.y += controls.reflectorYOffset ?? 0.015
+    r.updateMatrixWorld(true)
+
+    r.traverse((o) => {
+      const mesh = o as THREE.Mesh
+      if (!mesh.isMesh) return
+
       const refl = reflector()
-      // Distort the reflection UVs based on the wall normal map. This creates
-      // ripples in the reflection that follow the surface’s bumpiness, as
-      // demonstrated in the WebGPU mirror example. We sample the normal map at
-      // a higher frequency (multiplying the UVs by 5) and convert the sampled
-      // XY values from [0,1] to [-1,1]. The scale determines how strong the
-      // distortion appears; negative values invert the direction.
-      const normalScale = -0.05
-      const uvOffset = texture(wallNormal, uv().mul(5)).xy.mul(2).sub(1).mul(normalScale)
-      refl.uvNode = refl.uvNode.add(uvOffset)
-      // Compute a reflection scale based on the scene’s roughness settings. A
-      // higher material roughness reduces the reflection intensity. We use the
-      // floor roughness as a proxy for the table’s roughness; if you’d like
-      // to differentiate between materials, you could inspect the group and
-      // choose between `controls.floorRoughness`, `controls.wallRoughness` or
-      // `controls.roofRoughness` accordingly. The scale is clamped to [0,1].
-      // Use the wall roughness as the proxy for table surfaces. Tables are
-      // constructed with the same tile material as the walls (wall tile
-      // material). A higher wall roughness reduces the reflection intensity. If
-      // you want to blend based on a different material, adjust this value.
-      const reflectionScale = Math.max(0, Math.min(1, 1 - controls.wallRoughness))
-      // Multiply the reflection node by this scale so rough surfaces reflect
-      // less light. This approach mirrors the roughness‑driven blending
-      // demonstrated in the `webgpu_reflection_roughness.html` example.
-      const mat = new THREE.MeshPhongNodeMaterial({ colorNode: refl.mul(reflectionScale) })
-      // Blend the reflection with the underlying table by adjusting opacity.
-      // Transparent materials allow the baked texture to show through. Use the
-      // `mirror opacity` control in Leva to tune the effect.
+
+      // The reflector.glb UVs are authored separately from the room GLB.
+      // Keep the room PBR texture setup the same as the real table material
+      // (flipY = false, channel 0), but allow UV inversion here so the normal
+      // and roughness masks can be aligned to the authored reflector mesh.
+      const baseUv = uv()
+      const u = controls.reflectorUvFlipX ? float(1).sub(baseUv.x) : baseUv.x
+      const v = controls.reflectorUvFlipY ? float(1).sub(baseUv.y) : baseUv.y
+      const reflectorUv = vec2(
+        u.mul(controls.reflectorUvScaleX ?? 1).add(controls.reflectorUvOffsetX ?? 0),
+        v.mul(controls.reflectorUvScaleY ?? 1).add(controls.reflectorUvOffsetY ?? 0),
+      )
+
+      // Use the table/wall normal map to perturb only the reflected image.
+      // Keep the default at 0 while debugging visibility. Increase slowly after
+      // the test meshes are clearly visible in the reflection.
+      const normalDistortion = controls.reflectorNormalDistortion ?? 0
+      if (normalDistortion !== 0) {
+        const uvOffset = texture(wallNormal, reflectorUv).xy.mul(2).sub(1).mul(normalDistortion)
+        refl.uvNode = refl.uvNode.add(uvOffset)
+      }
+
+      // Roughness map as mask. The previous full inverse roughness mask could
+      // make the reflection almost invisible if the roughness texture was bright.
+      // This version keeps the table texture underneath, but only attenuates the
+      // reflector by a controllable amount:
+      //   mask strength 0.0 = full reflection everywhere
+      //   mask strength 1.0 = strict inverse roughness mask
+      const roughnessSample = texture(wallRoughness, reflectorUv).r
+      const maskStrength = controls.reflectorRoughnessMaskStrength ?? 0.5
+      const glossMask = float(1).sub(roughnessSample.mul(maskStrength))
+      const reflectionNode = refl.mul(glossMask.mul(controls.reflectorStrength ?? 2.5))
+      const debugMode = controls.reflectorDebugMode ?? 'reflection'
+      const colorNode =
+        debugMode === 'base color' ? texture(wallColor, reflectorUv).rgb :
+        debugMode === 'normal map' ? texture(wallNormal, reflectorUv).rgb :
+        debugMode === 'roughness mask' ? vec3(glossMask, glossMask, glossMask) :
+        reflectionNode
+
+      const mat = new THREE.MeshPhongNodeMaterial({ colorNode })
+      mat.name = 'TSL_Reflector_GLB_UV_Debug_Fix'
       mat.transparent = true
-      mat.opacity = controls.mirrorOpacity ?? 1
-      // Plane geometry sized to the table footprint
-      const geo = new THREE.PlaneGeometry(width, depth)
-      // Create the mesh and orient it horizontally
-      const plane = new THREE.Mesh(geo, mat)
-      plane.rotation.x = -Math.PI / 2
-      // Position the reflector slightly above the table and above the shadow plane
-      plane.position.set(position.x, position.y + 0.01, position.z)
-      plane.castShadow = false
-      plane.receiveShadow = false
-      // Attach the reflector’s render target so it updates automatically
-      plane.add(refl.target)
-      planes.push(plane)
+      mat.opacity = controls.reflectionsEnabled && controls.reflectorEnabled ? (controls.mirrorOpacity ?? 1) : 0
+      mat.blending = THREE.AdditiveBlending
+      mat.depthWrite = false
+      mat.depthTest = true
+      mat.side = THREE.DoubleSide
+      mat.needsUpdate = true
+
+      mesh.material = mat
+      mesh.castShadow = false
+      mesh.receiveShadow = false
+      mesh.frustumCulled = false
+      mesh.renderOrder = 20
+
+      // Important:
+      // The GLB mesh geometry gives us the authored reflector shape and UVs,
+      // but the reflector() node uses refl.target's WORLD TRANSFORM to define
+      // the mirror plane. A GLB plane can be horizontally modelled in its
+      // vertices while the object transform itself stays identity. In that
+      // case, blindly doing mesh.add(refl.target) makes the mirror camera use
+      // the wrong plane orientation.
+      //
+      // reflector() targets behave like a local XY mirror plane with a +Z
+      // normal. For a horizontal tabletop in XZ with +Y normal, the target
+      // usually needs X = -90 degrees. The Leva controls below let you correct
+      // this without rebaking/exporting the GLB.
+      const target = refl.target as THREE.Object3D
+      target.position.set(0, 0, 0)
+      target.rotation.set(
+        THREE.MathUtils.degToRad(controls.reflectorTargetRotX ?? -90),
+        THREE.MathUtils.degToRad(controls.reflectorTargetRotY ?? 0),
+        THREE.MathUtils.degToRad(controls.reflectorTargetRotZ ?? 0),
+      )
+      target.updateMatrixWorld(true)
+      mesh.add(target)
     })
-    return planes
-  }, [shadowPlanes, controls.reflectionsEnabled, controls.mirrorOpacity, controls.wallRoughness, wallNormal])
+
+    return r
+  }, [
+    reflectorGltf.scene, root, wallColor, wallNormal, wallRoughness,
+    controls.reflectionsEnabled, controls.reflectorEnabled,
+    controls.reflectorStrength, controls.reflectorNormalDistortion, controls.reflectorRoughnessMaskStrength, controls.reflectorYOffset,
+    controls.reflectorTargetRotX, controls.reflectorTargetRotY, controls.reflectorTargetRotZ,
+    controls.reflectorUvFlipX, controls.reflectorUvFlipY, controls.reflectorUvScaleX, controls.reflectorUvScaleY,
+    controls.reflectorUvOffsetX, controls.reflectorUvOffsetY, controls.reflectorDebugMode,
+  ])
 
   /* cube render target — static, captured once */
   const capControls = useControls('cube capture', {
@@ -643,17 +686,13 @@ function BakedRoom({ controls, forestExr, onReport, roomLight, dirLight, onLight
           rotation={[-Math.PI / 2, 0, 0]}
           receiveShadow
         >
-          {/* Plane sized to the table footprint. Rotation tilts it horizontally */}
           <planeGeometry args={[plane.width, plane.depth]} />
-          {/* ShadowMaterial darkens only where a shadow falls. Opacity is adjustable via controls. */}
           <shadowMaterial opacity={controls.shadowPlaneOpacity ?? 0.5} />
         </mesh>
       ))}
-      {/* Mirror planes: these overlay each table to provide planar reflections of
-          dynamic objects. They are only rendered when reflections are enabled. */}
-      {mirrorPlanes.map((plane, idx) => (
-        <primitive key={`mirror-plane-${idx}`} object={plane} />
-      ))}
+      {controls.reflectionsEnabled && controls.reflectorEnabled && (
+        <primitive object={reflectorRoot} />
+      )}
     </>
   )
 }
@@ -926,7 +965,21 @@ export default function AppWithLightProbes() {
       roofEnvIntensity:   { value: 0.05, min: 0, max: 3, step: 0.01, label: 'roof'  },
       woodEnvIntensity:   { value: 0.4,  min: 0, max: 3, step: 0.01, label: 'wood'  },
       metalEnvIntensity:  { value: 1,    min: 0, max: 5, step: 0.01, label: 'metal' },
-      mirrorOpacity:      { value: 1, min: 0, max: 1, step: 0.01, label: 'mirror opacity' },
+      reflectorEnabled:          { value: true, label: 'GLB reflector on' },
+      reflectorStrength:         { value: 2.5,  min: 0, max: 12, step: 0.05, label: 'GLB reflector strength' },
+      reflectorNormalDistortion: { value: 0.03, min: -0.2, max: 0.2, step: 0.005, label: 'normal distortion' },
+      reflectorRoughnessMaskStrength: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'roughness mask' },
+      reflectorYOffset:          { value: 0.015, min: -0.2, max: 0.2, step: 0.001, label: 'reflector Y offset' },
+      reflectorTargetRotX:      { value: -90, min: -180, max: 180, step: 1, label: 'target rot X' },
+      reflectorTargetRotY:      { value: 0,   min: -180, max: 180, step: 1, label: 'target rot Y' },
+      reflectorTargetRotZ:      { value: 0,   min: -180, max: 180, step: 1, label: 'target rot Z' },
+      reflectorUvFlipX:       { value: false, label: 'reflector UV flip X' },
+      reflectorUvFlipY:       { value: true,  label: 'reflector UV flip Y' },
+      reflectorUvScaleX:      { value: 1, min: -4, max: 4, step: 0.01, label: 'reflector UV scale X' },
+      reflectorUvScaleY:      { value: 1, min: -4, max: 4, step: 0.01, label: 'reflector UV scale Y' },
+      reflectorUvOffsetX:     { value: 0, min: -2, max: 2, step: 0.001, label: 'reflector UV offset X' },
+      reflectorUvOffsetY:     { value: 0, min: -2, max: 2, step: 0.001, label: 'reflector UV offset Y' },
+      reflectorDebugMode:     { value: 'reflection', options: ['reflection', 'base color', 'normal map', 'roughness mask'], label: 'reflector debug' },
     }),
 
     ao: folder({
@@ -991,24 +1044,37 @@ export default function AppWithLightProbes() {
       lightProbeIntensity: { value: 1, min: 0, max: 2, step: 0.02, label: 'probe intensity' },
       showProbeHelper:     { value: false, label: 'show probe helper' },
     }),
-
-    shadows: folder({
-      shadowPlaneOpacity: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'shadow opacity' },
-    }),
   })
 
-  // Leva flattens folder properties into the root of the returned object. When
-  // accessing values defined inside `folder()`, they appear as top‑level keys
-  // (e.g. `lightProbeIntensity` rather than `lightProbe.lightProbeIntensity`).
-  // To build our strongly typed SceneControls object, spread the raw values and
-  // then explicitly assign toneMapping and the probe controls.
+  const rawAny = raw as any
   const controls: SceneControls = {
     ...(raw as unknown as Omit<SceneControls, 'toneMapping' | 'lightProbeIntensity' | 'showProbeHelper'>),
-    toneMapping: TONE_MAPPING[(raw as any).toneMapping],
-    lightProbeIntensity: (raw as any).lightProbeIntensity,
-    showProbeHelper: (raw as any).showProbeHelper,
-    shadowPlaneOpacity: (raw as any).shadowPlaneOpacity,
-    mirrorOpacity: (raw as any).mirrorOpacity,
+    ...(rawAny.rendering ?? {}),
+    ...(rawAny.cubemap ?? {}),
+    ...(rawAny.reflections ?? {}),
+    ...(rawAny.ao ?? {}),
+    ...(rawAny.roughness ?? {}),
+    ...(rawAny.testModels ?? {}),
+    ...(rawAny.pointLights ?? {}),
+    ...(rawAny.spotlight ?? {}),
+    toneMapping: TONE_MAPPING[rawAny.toneMapping ?? rawAny.rendering?.toneMapping ?? 'None'],
+    lightProbeIntensity: rawAny.lightProbeIntensity ?? rawAny.lightProbe?.lightProbeIntensity ?? 1,
+    showProbeHelper: rawAny.showProbeHelper ?? rawAny.lightProbe?.showProbeHelper ?? false,
+    reflectorEnabled: rawAny.reflectorEnabled ?? rawAny.reflections?.reflectorEnabled ?? true,
+    reflectorStrength: rawAny.reflectorStrength ?? rawAny.reflections?.reflectorStrength ?? 2.5,
+    reflectorNormalDistortion: rawAny.reflectorNormalDistortion ?? rawAny.reflections?.reflectorNormalDistortion ?? 0.03,
+    reflectorRoughnessMaskStrength: rawAny.reflectorRoughnessMaskStrength ?? rawAny.reflections?.reflectorRoughnessMaskStrength ?? 0.5,
+    reflectorYOffset: rawAny.reflectorYOffset ?? rawAny.reflections?.reflectorYOffset ?? 0.015,
+    reflectorTargetRotX: rawAny.reflectorTargetRotX ?? rawAny.reflections?.reflectorTargetRotX ?? -90,
+    reflectorTargetRotY: rawAny.reflectorTargetRotY ?? rawAny.reflections?.reflectorTargetRotY ?? 0,
+    reflectorTargetRotZ: rawAny.reflectorTargetRotZ ?? rawAny.reflections?.reflectorTargetRotZ ?? 0,
+    reflectorUvFlipX: rawAny.reflectorUvFlipX ?? rawAny.reflections?.reflectorUvFlipX ?? false,
+    reflectorUvFlipY: rawAny.reflectorUvFlipY ?? rawAny.reflections?.reflectorUvFlipY ?? true,
+    reflectorUvScaleX: rawAny.reflectorUvScaleX ?? rawAny.reflections?.reflectorUvScaleX ?? 1,
+    reflectorUvScaleY: rawAny.reflectorUvScaleY ?? rawAny.reflections?.reflectorUvScaleY ?? 1,
+    reflectorUvOffsetX: rawAny.reflectorUvOffsetX ?? rawAny.reflections?.reflectorUvOffsetX ?? 0,
+    reflectorUvOffsetY: rawAny.reflectorUvOffsetY ?? rawAny.reflections?.reflectorUvOffsetY ?? 0,
+    reflectorDebugMode: rawAny.reflectorDebugMode ?? rawAny.reflections?.reflectorDebugMode ?? 'reflection',
   }
 
   const createRenderer = useCallback(async (props: Record<string, unknown>) => {
