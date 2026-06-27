@@ -18,17 +18,8 @@ dracoLoader.setDecoderConfig({ type: 'wasm' })
 export function classify(name: string): { group: Group; lightmap: Atlas } {
   const n = name.toLowerCase()
 
-  // Exact exported mesh names from the new grouped Blender file:
-  // background_objects:
-  //   columns, corridors
-  // roof:
-  //   coffer_slab.001, light_well_cross.001, roof_walls.003
-  // floor:
-  //   floor.002, platform.001
-  //
-  // Keep lightmap as 'tile' for now so this compiles with the current config.ts.
-  // BakedRoom.tsx will use the returned group to route to the new bg/floor/roof
-  // lightmaps and AO textures.
+  // Exact exported mesh names from the current grouped Blender file.
+  // These are the only room objects expected in lightmaps.glb.
   if (n === 'columns' || n === 'corridors') {
     return { group: 'wall', lightmap: 'tile' }
   }
@@ -44,34 +35,6 @@ export function classify(name: string): { group: Group; lightmap: Atlas } {
   if (n === 'floor.002' || n === 'platform.001') {
     return { group: 'floor', lightmap: 'tile' }
   }
-
-  // Robust fallback for renamed duplicates such as .002/.003 or future exports.
-  if (n.includes('column') || n.includes('corridor')) {
-    return { group: 'wall', lightmap: 'tile' }
-  }
-
-  if (
-    n.includes('roof') ||
-    n.includes('ceiling') ||
-    n.includes('coffer') ||
-    n.includes('light_well') ||
-    n.includes('lightwell')
-  ) {
-    return { group: 'roof', lightmap: 'tile' }
-  }
-
-  if (n.includes('floor') || n.includes('platform')) {
-    return { group: 'floor', lightmap: 'tile' }
-  }
-
-  // Legacy / fallback names from the previous room.
-  if (n.includes('beading') || n.includes('wood'))        return { group: 'wood',  lightmap: 'wood' }
-  if (n.includes('metal'))                                return { group: 'metal', lightmap: 'wood' }
-  if (n.startsWith('shelf'))                              return { group: 'wood',  lightmap: 'wood' }
-  if (n.includes('table') && n.includes('tile'))          return { group: 'wall',  lightmap: 'tile' }
-  if (n.startsWith('new_floor'))                          return { group: 'floor', lightmap: 'tile' }
-  if (n.startsWith('new_roof'))                           return { group: 'roof',  lightmap: 'tile' }
-  if (n.startsWith('new_wall'))                           return { group: 'wall',  lightmap: 'tile' }
 
   return { group: 'unknown', lightmap: 'tile' }
 }
