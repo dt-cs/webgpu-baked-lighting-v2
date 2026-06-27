@@ -1,12 +1,10 @@
 /**
  * lib.ts
- * Leaf utilities with no React: DRACO loader, mesh classification, texture
- * configuration, and the BPCEM env node. Pure helpers, safe to import anywhere.
+ * Leaf utilities with no React: DRACO loader, mesh classification, and texture
+ * configuration. Pure helpers, safe to import anywhere.
  */
 import * as THREE from 'three/webgpu'
-import { Fn, float, min as tslMin, positionWorld, pmremTexture, reflectVector, vec3 } from 'three/tsl'
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
-import { CUBEMAP_SIZE, CUBEMAP_POS } from './config'
 import type { Group, Atlas } from './config'
 
 /* ---------------------------- draco loader ------------------------------ */
@@ -82,27 +80,4 @@ export function copyPbr(src: THREE.Material, dst: THREE.MeshStandardNodeMaterial
   dst.side         = s.side         ?? THREE.FrontSide
   dst.name         = s.name         ?? ''
   return dst
-}
-
-/* ----------------------------- bpcem node ------------------------------- */
-export function makeBpcemEnvNode(cubeRt: THREE.CubeRenderTarget) {
-  const bpcemLookup = Fn(() => {
-    const cubeSize = vec3(CUBEMAP_SIZE.x, CUBEMAP_SIZE.y, CUBEMAP_SIZE.z)
-    const cubePos  = vec3(CUBEMAP_POS.x, CUBEMAP_POS.y, CUBEMAP_POS.z)
-    const pos = positionWorld
-    const R   = reflectVector
-    const half    = cubeSize.sub(cubePos).mul(0.5)
-    const rbmax   = half.sub(pos).div(R)
-    const rbmin   = half.negate().sub(pos).div(R)
-    const rbminmax = vec3(
-      R.x.greaterThan(float(0)).select(rbmax.x, rbmin.x),
-      R.y.greaterThan(float(0)).select(rbmax.y, rbmin.y),
-      R.z.greaterThan(float(0)).select(rbmax.z, rbmin.z),
-    )
-    const correction      = tslMin(tslMin(rbminmax.x, rbminmax.y), rbminmax.z)
-    const boxIntersection = pos.add(R.mul(correction))
-    return boxIntersection.sub(cubePos)
-  })()
-
-  return pmremTexture(cubeRt.texture, bpcemLookup)
 }
