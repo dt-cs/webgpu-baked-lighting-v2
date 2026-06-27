@@ -1,8 +1,12 @@
 /**
  * config.ts
- * Constants, shared types, and the Leva control schema — all in one file
- * because they change together: add a control -> add a type field -> maybe add
- * a constant. Sections: (1) constants (2) types (3) leva schema + flatten.
+ * Constants, shared types, and the Leva control schema.
+ *
+ * Current direction:
+ *   - baked black-background scene
+ *   - no reflector / BPCEM / DOF controls
+ *   - one concrete PBR set reused across floor, wall/background, and roof
+ *   - grouped lightmaps: background, floor, roof
  */
 import * as THREE from 'three/webgpu'
 import { folder } from 'leva'
@@ -10,30 +14,53 @@ import { folder } from 'leva'
 /* ======================================================================
  * 1. CONSTANTS
  * =================================================================== */
-export const MODEL_URL         = '/assets/simple_bake_01.glb'
-export const TEST_MODELS_URL   = '/assets/test_models.glb'
-//export const HTML_URL          = '/assets/html.glb'
-export const REFLECTOR_URL     = '/assets/reflector.glb'
-export const WINDOW_URL         = '/assets/window.glb'
-export const TILE_LIGHTMAP_URL = '/assets/bake_black_tile.png'
-export const WOOD_LIGHTMAP_URL = '/assets/wood_lm.png'
-export const TILE_AO_URL       = '/assets/ao_tile.png'
-export const WOOD_AO_URL       = '/assets/ao_wood.png'
-export const FOREST_EXR_URL    = '/hdr/fall-forest-dirt-road_2K_e53f34e1-5505-4646-adfa-a7d03f4259eb.exr'
+export const MODEL_URL       = '/assets/lightmaps.glb'
+export const TEST_MODELS_URL = '/assets/test_models.glb'
+export const WINDOW_URL      = '/assets/window.glb'
 
-export const FLOOR_COLOR_URL    = '/pbr/floor/tiles-11_diffuse.jpg'
-export const FLOOR_NORMAL_URL   = '/pbr/floor/tiles-11_normal.jpg'
-export const ROOF_COLOR_URL     = '/pbr/roof/concrete_04_color.jpg'
-export const ROOF_NORMAL_URL    = '/pbr/roof/concrete_04_normal.jpg'
-export const ROOF_ROUGHNESS_URL = '/pbr/roof/concrete_04_roughness.jpg'
-export const WALL_COLOR_URL     = '/pbr/wall/tiles10_diffuse.jpg'
-export const WALL_NORMAL_URL    = '/pbr/wall/tiles10_normal_opengl.jpg'
-export const WALL_ROUGHNESS_URL = '/pbr/wall/tiles10_roughness.jpg'
+// Kept only so older imports do not break while BakedRoom is being cleaned.
+// The reflector path is not used in the new no-reflection direction.
+export const REFLECTOR_URL = '/assets/reflector.glb'
 
-/** Blender world mapping Z = 277° — matches the bake orientation. */
+// Grouped baked GI textures from the new Blender export.
+export const BG_LIGHTMAP_URL    = '/assets/LM_Bake_bg.png'
+export const FLOOR_LIGHTMAP_URL = '/assets/LM_Bake_floor.png'
+export const ROOF_LIGHTMAP_URL  = '/assets/LM_Bake_roof.png'
+
+// Grouped AO textures. There is no separate bg AO yet, so background/wall uses floor AO for now.
+export const BG_AO_URL    = '/assets/AO_floor.png'
+export const FLOOR_AO_URL = '/assets/AO_floor.png'
+export const ROOF_AO_URL  = '/assets/AO_roof.png'
+
+// Compatibility aliases for the existing BakedRoom import names.
+// These will be removed after BakedRoom is patched to the grouped names above.
+export const TILE_LIGHTMAP_URL = BG_LIGHTMAP_URL
+export const WOOD_LIGHTMAP_URL = BG_LIGHTMAP_URL
+export const TILE_AO_URL       = BG_AO_URL
+export const WOOD_AO_URL       = BG_AO_URL
+
+// This EXR is no longer part of the final black-background look, but Scene may still import it.
+export const FOREST_EXR_URL = '/hdr/fall-forest-dirt-road_2K_e53f34e1-5505-4646-adfa-a7d03f4259eb.exr'
+
+// One concrete PBR set for all architectural surfaces.
+export const CONCRETE_COLOR_URL     = '/pbr/concrete/ConcreteClean01_Base_Color1K.jpg'
+export const CONCRETE_NORMAL_URL    = '/pbr/concrete/ConcreteClean01_NormalGL1K.png'
+export const CONCRETE_ROUGHNESS_URL = '/pbr/concrete/ConcreteClean01_PBRset1K.png'
+
+// Compatibility aliases for existing BakedRoom names.
+export const FLOOR_COLOR_URL     = CONCRETE_COLOR_URL
+export const FLOOR_NORMAL_URL    = CONCRETE_NORMAL_URL
+export const ROOF_COLOR_URL      = CONCRETE_COLOR_URL
+export const ROOF_NORMAL_URL     = CONCRETE_NORMAL_URL
+export const ROOF_ROUGHNESS_URL  = CONCRETE_ROUGHNESS_URL
+export const WALL_COLOR_URL      = CONCRETE_COLOR_URL
+export const WALL_NORMAL_URL     = CONCRETE_NORMAL_URL
+export const WALL_ROUGHNESS_URL  = CONCRETE_ROUGHNESS_URL
+
+/** Black-background scene. Skybox rotation is kept only for compatibility. */
 export const SKYBOX_ROTATION_Y_RAD = THREE.MathUtils.degToRad(277)
 
-/** Room interior AABB from new_floor.001 (metres). Room recentred at origin. */
+/** Room AABB placeholder. Recalculate after the new GLB is framed if BPCEM returns later. */
 export const CUBEMAP_SIZE = new THREE.Vector3(168.687, 68.251, 100.167)
 export const CUBEMAP_POS  = new THREE.Vector3(0, 0, 0)
 
@@ -47,7 +74,7 @@ export const TONE_MAPPING: Record<string, THREE.ToneMapping> = {
   Neutral:  THREE.NeutralToneMapping,
 }
 
-/** LUT .cube files for color grading (post-process, applied after tone mapping). */
+/** LUT .cube files for color grading. Disabled by default for the clean Figma look. */
 export const LUT_FILES: Record<string, string> = {
   'None':                          '',
   'Fujifilm 3510 D65':             '/cube/Rec709_Fujifilm_3510_D65.cube',
@@ -58,20 +85,16 @@ export const LUT_FILES: Record<string, string> = {
 /* ======================================================================
  * 2. TYPES
  * =================================================================== */
-export type Group = 'floor' | 'wall' | 'roof' | 'wood' | 'metal' | 'unknown'
+export type Group = 'floor' | 'wall' | 'roof' | 'unknown'
+
+// Kept as-is until BakedRoom is patched away from the old tile/wood branching.
 export type Atlas = 'tile' | 'wood'
+
 export type MaterialMode = 'GI only' | 'PBR + baked GI' | 'UV debug'
 
 export type PbrSet = { color: THREE.Texture; normal: THREE.Texture; roughness?: THREE.Texture }
 export type MeshReport = { meshCount: number; uv1Count: number; unmatched: string[] }
 
-/**
- * SceneControls — the flattened control object passed to all scene components.
- * Trimmed: no per-group env intensity, no global reflection, no cubemap offsets,
- * no background colour, no reflector UV editing, no AO intensity, no debug modes.
- * Roughness and normal-scale per group now drive BOTH the PBR material and the
- * reflector mask/distortion (single source of truth).
- */
 export type SceneControls = {
   // material / lightmap
   materialMode:      MaterialMode
@@ -86,7 +109,7 @@ export type SceneControls = {
   exposure:    number
   cameraFov:   number
 
-  // reflections
+  // reflections kept for compatibility, hard-disabled by flattenControls.
   reflectionsEnabled: boolean
   reflectorEnabled:   boolean
   reflectorYOffset:   number
@@ -94,12 +117,10 @@ export type SceneControls = {
   reflectorTargetRotY: number
   reflectorTargetRotZ: number
 
-  // synced roughness (drives material roughness + reflector gloss mask)
+  // synced surface controls
   floorRoughness: number
   wallRoughness:  number
   roofRoughness:  number
-
-  // synced normal scale (drives material normalScale + reflector distortion)
   floorNormalScale: number
   wallNormalScale:  number
   roofNormalScale:  number
@@ -126,18 +147,18 @@ export type SceneControls = {
   shadowNear: number; shadowFar: number; shadowFocus: number; shadowIntensity: number
   showHelper: boolean
 
-  // light probe
+  // light probe kept for compatibility, hard-disabled by flattenControls.
   lightProbeIntensity: number
   showProbeHelper: boolean
 
   // shadow catcher
   shadowPlaneOpacity: number
 
-  // color grading LUT
+  // color grading LUT kept for compatibility, disabled by default.
   lutName: string
   lutIntensity: number
 
-  // depth of field
+  // depth of field kept for compatibility, hard-disabled by flattenControls.
   dofEnabled: boolean
   dofFocusDistance: number
   dofFocalLength: number
@@ -161,38 +182,17 @@ export const levaSchema = {
     cameraFov:   { value: 24, min: 10, max: 90, step: 1, label: 'camera FOV' },
   }),
 
-  colorGrading: folder({
-    lutName:      { value: 'None', options: Object.keys(LUT_FILES), label: 'LUT' },
-    lutIntensity: { value: 1, min: 0, max: 1, step: 0.01, label: 'LUT intensity' },
-  }),
-
-  depthOfField: folder({
-    dofEnabled:       { value: false, label: 'DOF on' },
-    dofFocusDistance: { value: 120,  min: 1,   max: 1000, step: 1,   label: 'focus distance' },
-    dofFocalLength:   { value: 50,   min: 5,   max: 400,  step: 1,   label: 'focal length' },
-    dofBokehScale:    { value: 3,    min: 0,   max: 20,   step: 0.1, label: 'bokeh scale' },
-  }),
-
-  reflections: folder({
-    reflectionsEnabled: { value: true, label: 'reflections on' },
-    reflectorEnabled:   { value: true, label: 'GLB reflector on' },
-    reflectorYOffset:   { value: 0.015, min: -0.2, max: 0.2, step: 0.001, label: 'reflector Y offset' },
-    reflectorTargetRotX: { value: -90, min: -180, max: 180, step: 1, label: 'target rot X' },
-    reflectorTargetRotY: { value: 0,   min: -180, max: 180, step: 1, label: 'target rot Y' },
-    reflectorTargetRotZ: { value: 0,   min: -180, max: 180, step: 1, label: 'target rot Z' },
-  }),
-
   ao: folder({
     aoEnabled: { value: true, label: 'AO on' },
   }),
 
   surface: folder({
-    floorRoughness:   { value: 0.2,  min: 0, max: 1, step: 0.01, label: 'floor roughness' },
-    floorNormalScale: { value: 1,    min: 0, max: 2, step: 0.01, label: 'floor normal' },
-    wallRoughness:    { value: 0.5,  min: 0, max: 1, step: 0.01, label: 'wall roughness' },
-    wallNormalScale:  { value: 1,    min: 0, max: 2, step: 0.01, label: 'wall normal' },
-    roofRoughness:    { value: 0.85, min: 0, max: 1, step: 0.01, label: 'roof roughness' },
-    roofNormalScale:  { value: 1,    min: 0, max: 2, step: 0.01, label: 'roof normal' },
+    floorRoughness:   { value: 0.72, min: 0, max: 1, step: 0.01, label: 'floor roughness' },
+    floorNormalScale: { value: 0.55, min: 0, max: 2, step: 0.01, label: 'floor normal' },
+    wallRoughness:    { value: 0.78, min: 0, max: 1, step: 0.01, label: 'wall roughness' },
+    wallNormalScale:  { value: 0.45, min: 0, max: 2, step: 0.01, label: 'wall normal' },
+    roofRoughness:    { value: 0.82, min: 0, max: 1, step: 0.01, label: 'roof roughness' },
+    roofNormalScale:  { value: 0.55, min: 0, max: 2, step: 0.01, label: 'roof normal' },
     allFromGlb:       { value: false, label: 'all from GLB' },
   }),
 
@@ -208,7 +208,7 @@ export const levaSchema = {
     dirLightY: { value: 40, min: -100, max: 300, step: 1, label: 'dir light Y' },
     dirLightZ: { value: 120, min: -300, max: 300, step: 1, label: 'dir light Z' },
     dirLightColor: { value: '#fff8f0', label: 'dir light color' },
-    dirLightIntensity: { value: 3.0, min: 0, max: 20, step: 0.1, label: 'dir light intensity' },
+    dirLightIntensity: { value: 0, min: 0, max: 20, step: 0.1, label: 'dir light intensity' },
   }),
 
   spotlight: folder({
@@ -232,19 +232,13 @@ export const levaSchema = {
     showHelper: { value: false, label: 'show helper' },
     shadowPlaneOpacity: { value: 0.5, min: 0, max: 1, step: 0.01, label: 'shadow plane opacity' },
   }),
-
-  lightProbe: folder({
-    lightProbeIntensity: { value: 1, min: 0, max: 2, step: 0.02, label: 'probe intensity' },
-    showProbeHelper:     { value: false, label: 'show probe helper' },
-  }),
 }
 
-/** Flatten leva's nested folder output into a typed SceneControls. */
+/** Flatten Leva's nested folder output into a typed SceneControls. */
 export function flattenControls(raw: Record<string, unknown>): SceneControls {
   const r = raw as any
-  const pick = (k: string) => r[k] ?? r.rendering?.[k] ?? r.colorGrading?.[k] ?? r.reflections?.[k] ?? r.ao?.[k]
+  const pick = (k: string) => r[k] ?? r.rendering?.[k] ?? r.ao?.[k]
     ?? r.surface?.[k] ?? r.testModels?.[k] ?? r.directional?.[k] ?? r.spotlight?.[k]
-    ?? r.lightProbe?.[k] ?? r.depthOfField?.[k]
 
   return {
     materialMode:      r.materialMode,
@@ -256,12 +250,15 @@ export function flattenControls(raw: Record<string, unknown>): SceneControls {
     toneMapping:       TONE_MAPPING[pick('toneMapping') ?? 'None'],
     exposure:          pick('exposure'),
     cameraFov:         pick('cameraFov'),
-    reflectionsEnabled: pick('reflectionsEnabled'),
-    reflectorEnabled:   pick('reflectorEnabled'),
-    reflectorYOffset:   pick('reflectorYOffset'),
-    reflectorTargetRotX: pick('reflectorTargetRotX'),
-    reflectorTargetRotY: pick('reflectorTargetRotY'),
-    reflectorTargetRotZ: pick('reflectorTargetRotZ'),
+
+    // Disabled direction: no reflector, no BPCEM, no DOF.
+    reflectionsEnabled: false,
+    reflectorEnabled:   false,
+    reflectorYOffset:   0,
+    reflectorTargetRotX: -90,
+    reflectorTargetRotY: 0,
+    reflectorTargetRotZ: 0,
+
     floorRoughness:   pick('floorRoughness'),
     wallRoughness:    pick('wallRoughness'),
     roofRoughness:    pick('roofRoughness'),
@@ -270,9 +267,12 @@ export function flattenControls(raw: Record<string, unknown>): SceneControls {
     roofNormalScale:  pick('roofNormalScale'),
     aoEnabled:        pick('aoEnabled'),
     allFromGlb:       pick('allFromGlb'),
+
     modelX: pick('modelX'), modelY: pick('modelY'), modelZ: pick('modelZ'), modelScale: pick('modelScale'),
+
     dirLightX: pick('dirLightX'), dirLightY: pick('dirLightY'), dirLightZ: pick('dirLightZ'),
     dirLightColor: pick('dirLightColor'), dirLightIntensity: pick('dirLightIntensity'),
+
     spotEnabled: pick('spotEnabled'),
     spotX: pick('spotX'), spotY: pick('spotY'), spotZ: pick('spotZ'),
     spotTargetX: pick('spotTargetX'), spotTargetY: pick('spotTargetY'), spotTargetZ: pick('spotTargetZ'),
@@ -282,14 +282,17 @@ export function flattenControls(raw: Record<string, unknown>): SceneControls {
     shadowNear: pick('shadowNear'), shadowFar: pick('shadowFar'),
     shadowFocus: pick('shadowFocus'), shadowIntensity: pick('shadowIntensity'),
     showHelper: pick('showHelper'),
-    lightProbeIntensity: pick('lightProbeIntensity'),
-    showProbeHelper: pick('showProbeHelper'),
+
+    lightProbeIntensity: 0,
+    showProbeHelper: false,
     shadowPlaneOpacity: pick('shadowPlaneOpacity'),
-    lutName:      pick('lutName'),
-    lutIntensity: pick('lutIntensity'),
-    dofEnabled:       pick('dofEnabled'),
-    dofFocusDistance: pick('dofFocusDistance'),
-    dofFocalLength:   pick('dofFocalLength'),
-    dofBokehScale:    pick('dofBokehScale'),
+
+    lutName: 'None',
+    lutIntensity: 0,
+
+    dofEnabled: false,
+    dofFocusDistance: 120,
+    dofFocalLength: 50,
+    dofBokehScale: 3,
   }
 }
