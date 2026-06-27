@@ -1,14 +1,9 @@
 /**
  * TEMP App.tsx
+ * Single-file lightmap diagnostic.
  *
- * Single-file diagnostic scene for checking:
- *   - GLB mesh names
- *   - uv1 availability
- *   - lightmap assignment
- *   - AO assignment
- *   - concrete PBR assignment
- *
- * This file does not depend on config.ts, lib.ts, Scene.tsx, or BakedRoom.tsx.
+ * This intentionally avoids config.ts, lib.ts, Scene.tsx, BakedRoom.tsx,
+ * SceneLights.tsx, Window.tsx, and TestModels.tsx.
  */
 import { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import { Canvas, extend, useLoader, useThree } from '@react-three/fiber'
@@ -20,10 +15,6 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 
 extend(THREE as unknown as Record<string, unknown>)
-
-/* -------------------------------------------------------------------------- */
-/* ASSET PATHS                                                                */
-/* -------------------------------------------------------------------------- */
 
 const MODEL_URL = '/assets/lightmaps.glb'
 
@@ -39,58 +30,43 @@ const CONCRETE_COLOR_URL = '/pbr/concrete/ConcreteClean01_Base_Color1K.jpg'
 const CONCRETE_NORMAL_URL = '/pbr/concrete/ConcreteClean01_NormalGL1K.png'
 const CONCRETE_ROUGHNESS_PACKED_URL = '/pbr/concrete/ConcreteClean01_PBRset1K.png'
 
-/* -------------------------------------------------------------------------- */
-/* DRACO                                                                      */
-/* -------------------------------------------------------------------------- */
-
 const dracoLoader = new DRACOLoader()
 dracoLoader.setDecoderPath('/draco/')
 dracoLoader.setDecoderConfig({ type: 'wasm' })
 
-/* -------------------------------------------------------------------------- */
-/* TYPES                                                                      */
-/* -------------------------------------------------------------------------- */
-
 type GroupName = 'bg' | 'floor' | 'roof' | 'unknown'
+type MaterialMode = 'PBR + baked GI' | 'Lightmap debug' | 'AO debug' | 'Group color debug' | 'UV0 checker'
 
 type MeshReport = {
   meshCount: number
   uv0Count: number
   uv1Count: number
-  names: string[]
+  rows: { name: string; key: string; group: GroupName; uv0: boolean; uv1: boolean }[]
   unmatched: string[]
 }
 
-type MaterialMode =
-  | 'PBR + baked GI'
-  | 'Lightmap debug'
-  | 'AO debug'
-  | 'Group color debug'
-  | 'UV0 checker'
-
-/* -------------------------------------------------------------------------- */
-/* CLASSIFY EXACT CURRENT MESH NAMES                                          */
-/* -------------------------------------------------------------------------- */
+function meshKey(name: string) {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_]/g, '')
+}
 
 function classify(name: string): GroupName {
-  const n = name.toLowerCase()
+  const key = meshKey(name)
 
-  if (n === 'columns') return 'bg'
-  if (n === 'corridors') return 'bg'
+  if (key === 'columns' || key.includes('column')) return 'bg'
+  if (key === 'corridors' || key.includes('corridor')) return 'bg'
 
-  if (n === 'coffer_slab001') return 'roof'
-  if (n === 'light_well_cross001') return 'roof'
-  if (n === 'roof_walls003') return 'roof'
+  if (key === 'coffer_slab001' || key.includes('coffer_slab')) return 'roof'
+  if (key === 'light_well_cross001' || key.includes('light_well_cross')) return 'roof'
+  if (key === 'roof_walls003' || key.includes('roof_walls') || key.includes('roof')) return 'roof'
 
-  if (n === 'floor002') return 'floor'
-  if (n === 'platform001') return 'floor'
+  if (key === 'floor002' || key.includes('floor')) return 'floor'
+  if (key === 'platform001' || key.includes('platform')) return 'floor'
 
   return 'unknown'
 }
-
-/* -------------------------------------------------------------------------- */
-/* TEXTURE CONFIG                                                             */
-/* -------------------------------------------------------------------------- */
 
 function configureLightMap(t: THREE.Texture, channel: number, flipY: boolean, srgb: boolean) {
   t.flipY = flipY
@@ -110,19 +86,16 @@ function configureAoMap(t: THREE.Texture, channel: number, flipY: boolean) {
   t.needsUpdate = true
 }
 
-function configurePbrTexture(t: THREE.Texture, colorSpace: THREE.ColorSpace) {
+function configurePbr(t: THREE.Texture, colorSpace: THREE.ColorSpace, repeat = 1) {
   t.flipY = false
   t.channel = 0
   t.colorSpace = colorSpace
   t.wrapS = THREE.RepeatWrapping
   t.wrapT = THREE.RepeatWrapping
+  t.repeat.set(repeat, repeat)
   t.anisotropy = 8
   t.needsUpdate = true
 }
-
-/* -------------------------------------------------------------------------- */
-/* HELPERS                                                                    */
-/* -------------------------------------------------------------------------- */
 
 function groupLightMap(group: GroupName, maps: Record<'bg' | 'floor' | 'roof', THREE.Texture>) {
   if (group === 'floor') return maps.floor
@@ -149,7 +122,6 @@ function makeCheckerTexture() {
   const canvas = document.createElement('canvas')
   canvas.width = size
   canvas.height = size
-
   const ctx = canvas.getContext('2d')!
   const cell = size / cells
 
@@ -170,24 +142,14 @@ function makeCheckerTexture() {
   tex.wrapS = THREE.RepeatWrapping
   tex.wrapT = THREE.RepeatWrapping
   tex.needsUpdate = true
-
   return tex
 }
 
-/* -------------------------------------------------------------------------- */
-/* RENDERER SETTINGS                                                          */
-/* -------------------------------------------------------------------------- */
-
-function RendererSettings({ toneMapping, exposure, fov }: {
-  toneMapping: string
-  exposure: number
-  fov: number
-}) {
+function RendererSettings({ toneMapping, exposure, fov }: { toneMapping: string; exposure: number; fov: number }) {
   const { gl, camera, scene } = useThree()
 
   useEffect(() => {
     const renderer = gl as unknown as THREE.WebGPURenderer
-
     renderer.outputColorSpace = THREE.SRGBColorSpace
     renderer.toneMapping =
       toneMapping === 'ACES' ? THREE.ACESFilmicToneMapping :
@@ -195,9 +157,7 @@ function RendererSettings({ toneMapping, exposure, fov }: {
       toneMapping === 'AgX' ? THREE.AgXToneMapping :
       toneMapping === 'Linear' ? THREE.LinearToneMapping :
       THREE.NoToneMapping
-
     renderer.toneMappingExposure = exposure
-
     scene.environment = null
     scene.background = new THREE.Color('#000000')
   }, [gl, scene, toneMapping, exposure])
@@ -212,10 +172,6 @@ function RendererSettings({ toneMapping, exposure, fov }: {
 
   return null
 }
-
-/* -------------------------------------------------------------------------- */
-/* CAMERA                                                                     */
-/* -------------------------------------------------------------------------- */
 
 function CameraFrame() {
   const { camera, controls } = useThree()
@@ -246,20 +202,13 @@ function CameraFrame() {
   return null
 }
 
-/* -------------------------------------------------------------------------- */
-/* TEMP BAKED ROOM                                                            */
-/* -------------------------------------------------------------------------- */
-
-function TempBakedRoom({ onReport }: {
-  onReport: (r: MeshReport) => void
-}) {
+function TempBakedRoom({ onReport }: { onReport: (r: MeshReport) => void }) {
   const controls = useControls('TEMP lightmap debug', {
     materialMode: {
-      value: 'PBR + baked GI' as MaterialMode,
-      options: ['PBR + baked GI', 'Lightmap debug', 'AO debug', 'Group color debug', 'UV0 checker'] as MaterialMode[],
+      value: 'Group color debug' as MaterialMode,
+      options: ['Group color debug', 'Lightmap debug', 'AO debug', 'PBR + baked GI', 'UV0 checker'] as MaterialMode[],
     },
-
-    lightMapIntensity: { value: 1, min: 0, max: 4, step: 0.05 },
+    lightMapIntensity: { value: 1, min: 0, max: 8, step: 0.05 },
     lightMapChannel: {
       value: 1,
       options: {
@@ -269,60 +218,42 @@ function TempBakedRoom({ onReport }: {
     },
     lightMapFlipY: { value: false },
     lightMapSRGB: { value: true },
-
-    aoEnabled: { value: true },
+    aoEnabled: { value: false },
     aoIntensity: { value: 1, min: 0, max: 3, step: 0.05 },
-
     baseColorEnabled: { value: true },
     normalEnabled: { value: true },
     roughnessEnabled: { value: true },
-
     concreteRepeat: { value: 1, min: 0.1, max: 20, step: 0.1 },
-
     floorRoughness: { value: 0.72, min: 0, max: 1, step: 0.01 },
     wallRoughness: { value: 0.78, min: 0, max: 1, step: 0.01 },
     roofRoughness: { value: 0.82, min: 0, max: 1, step: 0.01 },
-
     floorNormal: { value: 0.55, min: 0, max: 2, step: 0.01 },
     wallNormal: { value: 0.45, min: 0, max: 2, step: 0.01 },
     roofNormal: { value: 0.55, min: 0, max: 2, step: 0.01 },
   })
 
-  const gltf = useLoader(GLTFLoader, MODEL_URL, (loader) => {
-    loader.setDRACOLoader(dracoLoader)
-  })
+  const gltf = useLoader(GLTFLoader, MODEL_URL, (loader) => loader.setDRACOLoader(dracoLoader))
 
-  const [
-    lmBg,
-    lmFloor,
-    lmRoof,
-    aoBg,
-    aoFloor,
-    aoRoof,
-    concreteColor,
-    concreteNormal,
-    concreteRoughnessPacked,
-  ] = useLoader(THREE.TextureLoader, [
-    LM_BG_URL,
-    LM_FLOOR_URL,
-    LM_ROOF_URL,
-    AO_BG_URL,
-    AO_FLOOR_URL,
-    AO_ROOF_URL,
-    CONCRETE_COLOR_URL,
-    CONCRETE_NORMAL_URL,
-    CONCRETE_ROUGHNESS_PACKED_URL,
-  ])
+  const [lmBg, lmFloor, lmRoof, aoBg, aoFloor, aoRoof, concreteColor, concreteNormal, concreteRoughnessPacked] =
+    useLoader(THREE.TextureLoader, [
+      LM_BG_URL,
+      LM_FLOOR_URL,
+      LM_ROOF_URL,
+      AO_BG_URL,
+      AO_FLOOR_URL,
+      AO_ROOF_URL,
+      CONCRETE_COLOR_URL,
+      CONCRETE_NORMAL_URL,
+      CONCRETE_ROUGHNESS_PACKED_URL,
+    ])
 
   const checker = useMemo(() => makeCheckerTexture(), [])
 
   const root = useMemo(() => {
     const r = gltf.scene.clone(true)
     r.updateMatrixWorld(true)
-
     const box = new THREE.Box3().setFromObject(r)
     const center = box.getCenter(new THREE.Vector3())
-
     r.position.sub(center)
     r.updateMatrixWorld(true)
 
@@ -338,23 +269,15 @@ function TempBakedRoom({ onReport }: {
   }, [gltf.scene])
 
   useEffect(() => {
-    const srgb = controls.lightMapSRGB
-
-    configureLightMap(lmBg, controls.lightMapChannel, controls.lightMapFlipY, srgb)
-    configureLightMap(lmFloor, controls.lightMapChannel, controls.lightMapFlipY, srgb)
-    configureLightMap(lmRoof, controls.lightMapChannel, controls.lightMapFlipY, srgb)
-
+    configureLightMap(lmBg, controls.lightMapChannel, controls.lightMapFlipY, controls.lightMapSRGB)
+    configureLightMap(lmFloor, controls.lightMapChannel, controls.lightMapFlipY, controls.lightMapSRGB)
+    configureLightMap(lmRoof, controls.lightMapChannel, controls.lightMapFlipY, controls.lightMapSRGB)
     configureAoMap(aoBg, controls.lightMapChannel, controls.lightMapFlipY)
     configureAoMap(aoFloor, controls.lightMapChannel, controls.lightMapFlipY)
     configureAoMap(aoRoof, controls.lightMapChannel, controls.lightMapFlipY)
-
-    configurePbrTexture(concreteColor, THREE.SRGBColorSpace)
-    configurePbrTexture(concreteNormal, THREE.NoColorSpace)
-    configurePbrTexture(concreteRoughnessPacked, THREE.NoColorSpace)
-
-    concreteColor.repeat.set(controls.concreteRepeat, controls.concreteRepeat)
-    concreteNormal.repeat.set(controls.concreteRepeat, controls.concreteRepeat)
-    concreteRoughnessPacked.repeat.set(controls.concreteRepeat, controls.concreteRepeat)
+    configurePbr(concreteColor, THREE.SRGBColorSpace, controls.concreteRepeat)
+    configurePbr(concreteNormal, THREE.NoColorSpace, controls.concreteRepeat)
+    configurePbr(concreteRoughnessPacked, THREE.NoColorSpace, controls.concreteRepeat)
   }, [
     controls.lightMapChannel,
     controls.lightMapFlipY,
@@ -375,38 +298,28 @@ function TempBakedRoom({ onReport }: {
     let meshCount = 0
     let uv0Count = 0
     let uv1Count = 0
-    const names: string[] = []
+    const rows: MeshReport['rows'] = []
     const unmatched: string[] = []
 
-    const lightMaps = {
-      bg: lmBg,
-      floor: lmFloor,
-      roof: lmRoof,
-    }
-
-    const aoMaps = {
-      bg: aoBg,
-      floor: aoFloor,
-      roof: aoRoof,
-    }
+    const lightMaps = { bg: lmBg, floor: lmFloor, roof: lmRoof }
+    const aoMaps = { bg: aoBg, floor: aoFloor, roof: aoRoof }
 
     root.traverse((o) => {
       const mesh = o as THREE.Mesh
       if (!mesh.isMesh) return
 
       meshCount++
-
       const name = mesh.name || '(unnamed)'
-      names.push(name)
-
+      const key = meshKey(name)
       const group = classify(name)
+      const uv0 = Boolean(mesh.geometry.getAttribute('uv'))
+      const uv1 = Boolean(mesh.geometry.getAttribute('uv1'))
+
       if (group === 'unknown') unmatched.push(name)
+      if (uv0) uv0Count++
+      if (uv1) uv1Count++
 
-      const hasUv0 = Boolean(mesh.geometry.getAttribute('uv'))
-      const hasUv1 = Boolean(mesh.geometry.getAttribute('uv1'))
-
-      if (hasUv0) uv0Count++
-      if (hasUv1) uv1Count++
+      rows.push({ name, key, group, uv0, uv1 })
 
       const lm = groupLightMap(group, lightMaps)
       const ao = groupAoMap(group, aoMaps)
@@ -414,35 +327,16 @@ function TempBakedRoom({ onReport }: {
       let material: THREE.Material
 
       if (controls.materialMode === 'Lightmap debug') {
-        material = new THREE.MeshBasicNodeMaterial({
-          map: lm,
-          side: THREE.DoubleSide,
-        })
+        material = new THREE.MeshBasicNodeMaterial({ map: lm, side: THREE.DoubleSide })
       } else if (controls.materialMode === 'AO debug') {
-        material = new THREE.MeshBasicNodeMaterial({
-          map: ao,
-          side: THREE.DoubleSide,
-        })
+        material = new THREE.MeshBasicNodeMaterial({ map: ao, side: THREE.DoubleSide })
       } else if (controls.materialMode === 'Group color debug') {
-        material = new THREE.MeshBasicNodeMaterial({
-          color: groupDebugColor(group),
-          side: THREE.DoubleSide,
-        })
+        material = new THREE.MeshBasicNodeMaterial({ color: groupDebugColor(group), side: THREE.DoubleSide })
       } else if (controls.materialMode === 'UV0 checker') {
-        material = new THREE.MeshBasicNodeMaterial({
-          map: checker,
-          side: THREE.DoubleSide,
-        })
+        material = new THREE.MeshBasicNodeMaterial({ map: checker, side: THREE.DoubleSide })
       } else {
-        const roughness =
-          group === 'floor' ? controls.floorRoughness :
-          group === 'roof' ? controls.roofRoughness :
-          controls.wallRoughness
-
-        const normalScale =
-          group === 'floor' ? controls.floorNormal :
-          group === 'roof' ? controls.roofNormal :
-          controls.wallNormal
+        const roughness = group === 'floor' ? controls.floorRoughness : group === 'roof' ? controls.roofRoughness : controls.wallRoughness
+        const normalScale = group === 'floor' ? controls.floorNormal : group === 'roof' ? controls.roofNormal : controls.wallNormal
 
         const mat = new THREE.MeshStandardNodeMaterial({
           color: '#ffffff',
@@ -453,26 +347,19 @@ function TempBakedRoom({ onReport }: {
           side: THREE.DoubleSide,
         })
 
-        // Your Blender material uses BLUE from the packed PBR texture as roughness.
         if (controls.roughnessEnabled) {
           mat.roughnessNode = texture(concreteRoughnessPacked).b.mul(float(roughness)).saturate()
         }
 
         mat.normalScale.set(normalScale, normalScale)
-
         mat.lightMap = lm
         mat.lightMapIntensity = controls.lightMapIntensity
-
         mat.aoMap = controls.aoEnabled ? ao : null
         mat.aoMapIntensity = controls.aoIntensity
-
         mat.envMap = null
         mat.envNode = null
         mat.envMapIntensity = 0
-
-        // Room is fully baked. No realtime lights.
         mat.lightsNode = lights([])
-
         mat.needsUpdate = true
         material = mat
       }
@@ -480,26 +367,15 @@ function TempBakedRoom({ onReport }: {
       mesh.material = material
     })
 
-    console.table(names.map((name) => {
-      const group = classify(name)
-      return {
-        name,
-        group,
-        lightmap:
-          group === 'floor' ? 'LM_Bake_floor.png' :
-          group === 'roof' ? 'LM_Bake_roof.png' :
-          group === 'bg' ? 'LM_Bake_bg.png' :
-          'UNKNOWN uses BG fallback',
-        uv0: Boolean((root.getObjectByName(name) as THREE.Mesh | undefined)?.geometry?.getAttribute('uv')),
-        uv1: Boolean((root.getObjectByName(name) as THREE.Mesh | undefined)?.geometry?.getAttribute('uv1')),
-      }
-    }))
-
-    onReport({ meshCount, uv0Count, uv1Count, names, unmatched })
+    console.table(rows)
+    onReport({ meshCount, uv0Count, uv1Count, rows, unmatched })
   }, [
     root,
     controls.materialMode,
     controls.lightMapIntensity,
+    controls.lightMapChannel,
+    controls.lightMapFlipY,
+    controls.lightMapSRGB,
     controls.aoEnabled,
     controls.aoIntensity,
     controls.baseColorEnabled,
@@ -527,12 +403,8 @@ function TempBakedRoom({ onReport }: {
   return <primitive object={root} />
 }
 
-/* -------------------------------------------------------------------------- */
-/* DIAGNOSTICS                                                                */
-/* -------------------------------------------------------------------------- */
-
 function Diagnostics({ report }: { report: MeshReport }) {
-  const ok = report.meshCount > 0 && report.uv1Count === report.meshCount
+  const ok = report.meshCount > 0 && report.uv1Count === report.meshCount && report.unmatched.length === 0
 
   return (
     <div style={{
@@ -546,45 +418,26 @@ function Diagnostics({ report }: { report: MeshReport }) {
       background: 'rgba(0,0,0,0.72)',
       borderRadius: 6,
       pointerEvents: 'none',
-      maxWidth: 520,
+      maxWidth: 680,
     }}>
       <div>meshes: {report.meshCount}</div>
       <div>with uv0: {report.uv0Count}</div>
-      <div>with uv1: {report.uv1Count}{ok ? '  (all good)' : '  (some missing uv1!)'}</div>
-
-      {report.unmatched.length > 0 && (
-        <div style={{ marginTop: 6, color: '#ff66cc' }}>
-          unmatched: {report.unmatched.join(', ')}
-        </div>
-      )}
-
-      {report.names.length > 0 && (
+      <div>with uv1: {report.uv1Count}{report.uv1Count === report.meshCount ? '  (all good)' : '  (some missing uv1!)'}</div>
+      {report.unmatched.length > 0 && <div style={{ marginTop: 6, color: '#ff66cc' }}>unmatched: {report.unmatched.join(', ')}</div>}
+      {report.rows.length > 0 && (
         <div style={{ marginTop: 6 }}>
-          names: {report.names.join(', ')}
+          {report.rows.map((row) => `${row.name} → ${row.key} → ${row.group}`).join(' | ')}
         </div>
       )}
     </div>
   )
 }
 
-/* -------------------------------------------------------------------------- */
-/* APP                                                                        */
-/* -------------------------------------------------------------------------- */
-
 export default function App() {
-  const [report, setReport] = useState<MeshReport>({
-    meshCount: 0,
-    uv0Count: 0,
-    uv1Count: 0,
-    names: [],
-    unmatched: [],
-  })
+  const [report, setReport] = useState<MeshReport>({ meshCount: 0, uv0Count: 0, uv1Count: 0, rows: [], unmatched: [] })
 
   const renderControls = useControls('TEMP renderer', {
-    toneMapping: {
-      value: 'None',
-      options: ['None', 'Linear', 'ACES', 'AgX', 'Neutral'],
-    },
+    toneMapping: { value: 'None', options: ['None', 'Linear', 'ACES', 'AgX', 'Neutral'] },
     exposure: { value: 1, min: 0.1, max: 3, step: 0.01 },
     fov: { value: 24, min: 10, max: 90, step: 1 },
   })
@@ -598,21 +451,10 @@ export default function App() {
   return (
     <main style={{ width: '100vw', height: '100vh', background: '#000' }}>
       <Diagnostics report={report} />
-
-      <Canvas
-        gl={createRenderer}
-        dpr={[1, 1.5]}
-        camera={{ position: [80, 40, 120], fov: 24, near: 0.5, far: 5000 }}
-      >
+      <Canvas gl={createRenderer} dpr={[1, 1.5]} camera={{ position: [80, 40, 120], fov: 24, near: 0.5, far: 5000 }}>
         <Suspense fallback={null}>
-          <RendererSettings
-            toneMapping={renderControls.toneMapping}
-            exposure={renderControls.exposure}
-            fov={renderControls.fov}
-          />
-
+          <RendererSettings toneMapping={renderControls.toneMapping} exposure={renderControls.exposure} fov={renderControls.fov} />
           <TempBakedRoom onReport={setReport} />
-
           <CameraFrame />
           <OrbitControls makeDefault enablePan enableZoom enableDamping dampingFactor={0.08} />
         </Suspense>
