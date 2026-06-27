@@ -1,6 +1,6 @@
 /**
  * Scene.tsx
- * Assembles renderer settings, lights, baked room, imported models, and camera.
+ * Assembles renderer settings, baked room, and camera.
  *
  * Current direction:
  *   - black-background baked scene
@@ -8,14 +8,13 @@
  *   - no BPCEM env node
  *   - no light probe
  *   - no window reflection layer
+ *   - test models remain in the repo but are not mounted for now
  */
-import { Suspense, useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three/webgpu'
-import { SceneLights } from './SceneLights'
 import { BakedRoom } from './BakedRoom'
-import { TestModels } from './TestModels'
 import type { MeshReport, SceneControls } from '../config'
 
 /* renderer + camera fov */
@@ -82,8 +81,6 @@ export function Scene({ controls, onReport }: {
   onReport: (r: MeshReport) => void
 }) {
   const { scene } = useThree()
-  const [dirLight, setDirLight] = useState<THREE.DirectionalLight | null>(null)
-  const [spotLight, setSpotLight] = useState<THREE.SpotLight | null>(null)
 
   /* black portfolio background */
   useEffect(() => {
@@ -99,25 +96,10 @@ export function Scene({ controls, onReport }: {
         fov={controls.cameraFov}
       />
 
-      <SceneLights
-        onDirLight={setDirLight}
-        onSpotLight={setSpotLight}
-        controls={controls}
-      />
-
       <BakedRoom
         controls={controls}
         onReport={onReport}
       />
-
-      <Suspense fallback={null}>
-        <TestModels
-          controls={controls}
-          dirLight={dirLight}
-          spotLight={spotLight}
-          lightProbe={null}
-        />
-      </Suspense>
 
       <FrameOnce />
       <OrbitControls makeDefault enablePan enableZoom enableDamping dampingFactor={0.08} />
