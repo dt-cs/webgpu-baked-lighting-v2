@@ -9,7 +9,7 @@
  *   - no light probe
  *   - no window reflection layer
  */
-import { Suspense, useEffect } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three/webgpu'
@@ -82,8 +82,8 @@ export function Scene({ controls, onReport }: {
   onReport: (r: MeshReport) => void
 }) {
   const { scene } = useThree()
-  const [dirLight, setDirLight] = React.useState<THREE.DirectionalLight | null>(null)
-  const [spotLight, setSpotLight] = React.useState<THREE.SpotLight | null>(null)
+  const [dirLight, setDirLight] = useState<THREE.DirectionalLight | null>(null)
+  const [spotLight, setSpotLight] = useState<THREE.SpotLight | null>(null)
 
   /* black portfolio background */
   useEffect(() => {
