@@ -18,19 +18,35 @@ dracoLoader.setDecoderConfig({ type: 'wasm' })
 export function classify(name: string): { group: Group; lightmap: Atlas } {
   const n = name.toLowerCase()
 
-  // New grouped bake naming from lightmaps.glb:
-  //   background_objects: columns, corridors, walls / background elements
-  //   roof: coffer slab, light wells, roof walls
-  //   floor: floor slabs and platforms
+  // Exact exported mesh names from the new grouped Blender file:
+  // background_objects:
+  //   columns, corridors
+  // roof:
+  //   coffer_slab.001, light_well_cross.001, roof_walls.003
+  // floor:
+  //   floor.002, platform.001
+  //
   // Keep lightmap as 'tile' for now so this compiles with the current config.ts.
-  // After config.ts is updated, BakedRoom.tsx will route these groups to the new
-  // LM_Bake_bg / LM_Bake_floor / LM_Bake_roof textures.
+  // BakedRoom.tsx will use the returned group to route to the new bg/floor/roof
+  // lightmaps and AO textures.
+  if (n === 'columns' || n === 'corridors') {
+    return { group: 'wall', lightmap: 'tile' }
+  }
+
   if (
-    n.includes('column') ||
-    n.includes('corridor') ||
-    n.includes('background') ||
-    n.includes('wall')
+    n === 'coffer_slab.001' ||
+    n === 'light_well_cross.001' ||
+    n === 'roof_walls.003'
   ) {
+    return { group: 'roof', lightmap: 'tile' }
+  }
+
+  if (n === 'floor.002' || n === 'platform.001') {
+    return { group: 'floor', lightmap: 'tile' }
+  }
+
+  // Robust fallback for renamed duplicates such as .002/.003 or future exports.
+  if (n.includes('column') || n.includes('corridor')) {
     return { group: 'wall', lightmap: 'tile' }
   }
 
@@ -44,11 +60,7 @@ export function classify(name: string): { group: Group; lightmap: Atlas } {
     return { group: 'roof', lightmap: 'tile' }
   }
 
-  if (
-    n.includes('floor') ||
-    n.includes('platform') ||
-    n.includes('slab')
-  ) {
+  if (n.includes('floor') || n.includes('platform')) {
     return { group: 'floor', lightmap: 'tile' }
   }
 
