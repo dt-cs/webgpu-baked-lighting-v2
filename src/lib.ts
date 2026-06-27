@@ -17,14 +17,50 @@ dracoLoader.setDecoderConfig({ type: 'wasm' })
 /* --------------------------- mesh classify ------------------------------ */
 export function classify(name: string): { group: Group; lightmap: Atlas } {
   const n = name.toLowerCase()
+
+  // New grouped bake naming from lightmaps.glb:
+  //   background_objects: columns, corridors, walls / background elements
+  //   roof: coffer slab, light wells, roof walls
+  //   floor: floor slabs and platforms
+  // Keep lightmap as 'tile' for now so this compiles with the current config.ts.
+  // After config.ts is updated, BakedRoom.tsx will route these groups to the new
+  // LM_Bake_bg / LM_Bake_floor / LM_Bake_roof textures.
+  if (
+    n.includes('column') ||
+    n.includes('corridor') ||
+    n.includes('background') ||
+    n.includes('wall')
+  ) {
+    return { group: 'wall', lightmap: 'tile' }
+  }
+
+  if (
+    n.includes('roof') ||
+    n.includes('ceiling') ||
+    n.includes('coffer') ||
+    n.includes('light_well') ||
+    n.includes('lightwell')
+  ) {
+    return { group: 'roof', lightmap: 'tile' }
+  }
+
+  if (
+    n.includes('floor') ||
+    n.includes('platform') ||
+    n.includes('slab')
+  ) {
+    return { group: 'floor', lightmap: 'tile' }
+  }
+
+  // Legacy / fallback names from the previous room.
   if (n.includes('beading') || n.includes('wood'))        return { group: 'wood',  lightmap: 'wood' }
   if (n.includes('metal'))                                return { group: 'metal', lightmap: 'wood' }
   if (n.startsWith('shelf'))                              return { group: 'wood',  lightmap: 'wood' }
   if (n.includes('table') && n.includes('tile'))          return { group: 'wall',  lightmap: 'tile' }
-  if (n.startsWith('new_floor') || n.startsWith('floor')) return { group: 'floor', lightmap: 'tile' }
-  if (n.startsWith('new_roof')  || n.startsWith('roof') || n.includes('ceiling'))
-                                                          return { group: 'roof',  lightmap: 'tile' }
-  if (n.startsWith('new_wall')  || n.startsWith('wall'))  return { group: 'wall',  lightmap: 'tile' }
+  if (n.startsWith('new_floor'))                          return { group: 'floor', lightmap: 'tile' }
+  if (n.startsWith('new_roof'))                           return { group: 'roof',  lightmap: 'tile' }
+  if (n.startsWith('new_wall'))                           return { group: 'wall',  lightmap: 'tile' }
+
   return { group: 'unknown', lightmap: 'tile' }
 }
 
@@ -49,10 +85,10 @@ export function configureLightMap(t: THREE.Texture, channel: number, flipY: bool
 }
 
 export function configureAoMap(t: THREE.Texture, channel: number, flipY: boolean) {
-  // AO baked as sRGB 8-bit PNG — decode as sRGB so linear values feed correctly.
+  // AO is data, not color. It must not be sRGB-decoded.
   t.flipY = flipY
   t.channel = channel
-  t.colorSpace = THREE.SRGBColorSpace
+  t.colorSpace = THREE.NoColorSpace
   t.wrapS = THREE.ClampToEdgeWrapping
   t.wrapT = THREE.ClampToEdgeWrapping
   t.needsUpdate = true
